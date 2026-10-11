@@ -63,6 +63,9 @@ public class Workshop {
     @Column(name = "meeting_link", length = 500)
     private String meetingLink;
 
+    @Column(name = "registration_form_url", length = 500)
+    private String registrationFormUrl;
+
     @Column(nullable = false)
     private int capacity;
 

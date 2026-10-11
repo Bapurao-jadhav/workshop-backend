@@ -24,6 +24,8 @@ public record WorkshopResponse(
         @Schema(example = "Auditorium B, Tech Park, Latur") String venue,
         @Schema(description = "True when the workshop has an online meeting link") boolean online,
         @Schema(description = "Visible to admins only on this endpoint") String meetingLink,
+        @Schema(description = "Google Form for seat requests; visible to admins only on this endpoint")
+        String registrationFormUrl,
         @Schema(example = "60") int capacity,
         @Schema(example = "57") long availableSeats,
         @Schema(example = "3") long participantCount,
@@ -35,13 +37,13 @@ public record WorkshopResponse(
         Instant createdAt,
         Instant updatedAt) {
 
-    public static WorkshopResponse from(Workshop w, long confirmed, boolean registrationOpen,
-                                        boolean includeMeetingLink) {
+    public static WorkshopResponse from(Workshop w, long confirmed, long activeRegistrations,
+                                        boolean registrationOpen, boolean includeMeetingLink) {
         return new WorkshopResponse(w.getId(), w.getTitle(), w.getDescription(), w.getCategory(),
                 w.getInstructorName(), w.getTargetAudience(), w.getWorkshopDate(), w.getStartTime(),
                 w.getEndTime(), w.getRegistrationDeadline(), w.getVenue(),
                 w.getMeetingLink() != null, includeMeetingLink ? w.getMeetingLink() : null,
-                w.getCapacity(), Math.max(0, w.getCapacity() - confirmed), confirmed, w.getFee(),
+                includeMeetingLink ? w.getRegistrationFormUrl() : null, w.getCapacity(), Math.max(0, w.getCapacity() - activeRegistrations), confirmed, w.getFee(),
                 w.getImageUrl(), w.getStatus(), registrationOpen, w.getCreatedAt(), w.getUpdatedAt());
     }
 }

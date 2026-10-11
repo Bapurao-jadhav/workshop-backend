@@ -42,6 +42,11 @@ public class Registration {
     @Column(nullable = false, length = 20)
     private RegistrationStatus status;
 
+    /** How the request arrived: FORM_WEBHOOK = verified Google Form submission, WEB_APP = user clicked "I submitted". */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "submission_source", length = 20)
+    private SubmissionSource submissionSource;
+
     @Column(name = "registered_at", nullable = false)
     private Instant registeredAt;
 

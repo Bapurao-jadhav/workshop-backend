@@ -2,9 +2,11 @@ package com.workshop.service;
 
 import com.workshop.dto.AdminRegistrationResponse;
 import com.workshop.dto.PageResponse;
+import com.workshop.dto.RegistrationFormResponse;
 import com.workshop.dto.RegistrationResponse;
 import com.workshop.entity.Registration;
 import com.workshop.entity.RegistrationStatus;
+import com.workshop.entity.SubmissionSource;
 import com.workshop.entity.User;
 import com.workshop.entity.Workshop;
 import com.workshop.entity.WorkshopStatus;
@@ -54,11 +56,49 @@ public class RegistrationService {
     /**
      * Registers a user. The workshop row is locked (SELECT ... FOR UPDATE) for the duration of the transaction, so
      * the "seats left" check and the insert are atomic with respect to other registrations for the same workshop.
-     * The unique (user_id, workshop_id) constraint is the last line of defence against duplicates. The
-     * confirmation email is sent only after the transaction commits and can never roll it back.
+     * The unique (user_id, workshop_id) constraint is the last line of defence against duplicates. New registrations
+     * remain PENDING until an administrator confirms or rejects them; the matching email is sent after that decision commits.
      */
     @Transactional
     public RegistrationResponse register(Long userId, Long workshopId) {
+        return register(userId, workshopId, SubmissionSource.WEB_APP);
+    }
+
+    /** Step 1 of the flow: tells the user which Google Form to fill in. Nothing is created yet. */
+    @Transactional(readOnly = true)
+    public RegistrationFormResponse getRegistrationForm(Long userId, Long workshopId) {
+        Workshop workshop = workshopRepository.findById(workshopId)
+                .orElseThrow(() -> new ResourceNotFoundException("Workshop not found"));
+        if (workshop.getStatus() == WorkshopStatus.CANCELLED) {
+            throw new BusinessRuleException("This workshop has been cancelled");
+        }
+        if (workshop.getStatus() != WorkshopStatus.PUBLISHED) {
+            throw new BusinessRuleException("This workshop is not open for registration");
+        }
+        if (LocalDateTime.now(clock).isAfter(workshop.getRegistrationDeadline())) {
+            throw new BusinessRuleException("The registration deadline for this workshop has passed");
+        }
+        if (!StringUtils.hasText(workshop.getRegistrationFormUrl())) {
+            throw new BusinessRuleException("This workshop has no registration form yet");
+        }
+        Optional<Registration> existing = registrationRepository.findByUserIdAndWorkshopId(userId, workshopId);
+        if (existing.isPresent() && (existing.get().getStatus() == RegistrationStatus.CONFIRMED
+                || existing.get().getStatus() == RegistrationStatus.PENDING)) {
+            throw new ConflictException("You are already registered or have a pending registration for this workshop");
+        }
+        long active = registrationRepository.countByWorkshopIdAndStatusIn(workshopId,
+                List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED));
+        if (active >= workshop.getCapacity()) {
+            throw new ConflictException("This workshop is full");
+        }
+        return new RegistrationFormResponse(workshop.getId(), workshop.getTitle(), workshop.getRegistrationFormUrl(),
+                "Fill in the form using the same email as your account. Your request is sent to the admin "
+                        + "automatically; if it does not show up under your registrations, come back and confirm "
+                        + "that you submitted the form.");
+    }
+
+    @Transactional
+    public RegistrationResponse register(Long userId, Long workshopId, SubmissionSource source) {
         Workshop workshop = workshopRepository.findByIdForUpdate(workshopId)
                 .orElseThrow(() -> new ResourceNotFoundException("Workshop not found"));
         User user = userRepository.findById(userId)
@@ -76,12 +116,14 @@ public class RegistrationService {
         }
 
         Optional<Registration> existing = registrationRepository.findByUserIdAndWorkshopId(userId, workshopId);
-        if (existing.isPresent() && existing.get().getStatus() == RegistrationStatus.CONFIRMED) {
-            throw new ConflictException("You are already registered for this workshop");
+        if (existing.isPresent() && (existing.get().getStatus() == RegistrationStatus.CONFIRMED
+                || existing.get().getStatus() == RegistrationStatus.PENDING)) {
+            throw new ConflictException("You are already registered or have a pending registration for this workshop");
         }
 
-        long confirmed = registrationRepository.countByWorkshopIdAndStatus(workshopId, RegistrationStatus.CONFIRMED);
-        if (confirmed >= workshop.getCapacity()) {
+        long activeRegistrations = registrationRepository.countByWorkshopIdAndStatusIn(workshopId,
+                List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED));
+        if (activeRegistrations >= workshop.getCapacity()) {
             throw new ConflictException("This workshop is full");
         }
 
@@ -89,17 +131,60 @@ public class RegistrationService {
         Registration registration = existing.orElseGet(Registration::new);
         registration.setUser(user);
         registration.setWorkshop(workshop);
-        registration.setStatus(RegistrationStatus.CONFIRMED);
+        registration.setStatus(RegistrationStatus.PENDING);
+        registration.setSubmissionSource(source);
         registration.setRegisteredAt(Instant.now(clock));
         registration.setCancelledAt(null);
         registrationRepository.saveAndFlush(registration);
 
-        eventPublisher.publishEvent(new RegistrationConfirmedEvent(
-                registration.getId(), user.getName(), user.getEmail(), workshop.getTitle(),
-                workshop.getWorkshopDate(), workshop.getStartTime(), workshop.getEndTime(),
-                workshop.getVenue(), workshop.getMeetingLink()));
-
+        // Confirmation/rejection emails are sent only after an admin decides the registration status.
         return RegistrationResponse.from(registration, isCancellable(registration, now));
+    }
+
+    @Transactional
+    public AdminRegistrationResponse decideRegistration(Long registrationId, RegistrationStatus requestedStatus) {
+        if (requestedStatus != RegistrationStatus.CONFIRMED && requestedStatus != RegistrationStatus.REJECTED) {
+            throw new BusinessRuleException("Admin can only set registration status to CONFIRMED or REJECTED");
+        }
+
+        // Lock the workshop first, matching the lock order used by new registrations and preventing overbooking.
+        Long workshopId = registrationRepository.findWorkshopIdByRegistrationId(registrationId)
+                .orElseThrow(() -> new ResourceNotFoundException("Registration not found"));
+        Workshop workshop = workshopRepository.findByIdForUpdate(workshopId)
+                .orElseThrow(() -> new ResourceNotFoundException("Workshop not found"));
+        // Load the registration after acquiring the workshop lock so a concurrent admin decision is observed.
+        Registration registration = registrationRepository.findById(registrationId)
+                .orElseThrow(() -> new ResourceNotFoundException("Registration not found"));
+        registration.setWorkshop(workshop);
+
+        if (registration.getStatus() != RegistrationStatus.PENDING) {
+            throw new BusinessRuleException("Only PENDING registrations can be approved or rejected");
+        }
+
+        if (requestedStatus == RegistrationStatus.CONFIRMED) {
+            long confirmed = registrationRepository.countByWorkshopIdAndStatus(
+                    workshop.getId(), RegistrationStatus.CONFIRMED);
+            if (confirmed >= workshop.getCapacity()) {
+                throw new ConflictException("This workshop is full; the registration cannot be confirmed");
+            }
+        }
+
+        registration.setStatus(requestedStatus);
+        registration.setCancelledAt(null);
+        registrationRepository.saveAndFlush(registration);
+
+        User user = registration.getUser();
+        if (requestedStatus == RegistrationStatus.CONFIRMED) {
+            eventPublisher.publishEvent(new RegistrationConfirmedEvent(
+                    registration.getId(), user.getName(), user.getEmail(), workshop.getTitle(),
+                    workshop.getWorkshopDate(), workshop.getStartTime(), workshop.getEndTime(),
+                    workshop.getVenue(), workshop.getMeetingLink()));
+        } else {
+            eventPublisher.publishEvent(new RegistrationRejectedEvent(
+                    registration.getId(), user.getName(), user.getEmail(), workshop.getTitle(),
+                    workshop.getWorkshopDate(), workshop.getStartTime(), workshop.getEndTime(), workshop.getVenue()));
+        }
+        return AdminRegistrationResponse.from(registration);
     }
 
     @Transactional(readOnly = true)
@@ -158,7 +243,7 @@ public class RegistrationService {
     }
 
     private static boolean isCancellable(Registration r, LocalDateTime now) {
-        return r.getStatus() == RegistrationStatus.CONFIRMED
+        return (r.getStatus() == RegistrationStatus.PENDING || r.getStatus() == RegistrationStatus.CONFIRMED)
                 && r.getWorkshop().getStatus() != WorkshopStatus.CANCELLED
                 && now.isBefore(r.getWorkshop().startsAt());
     }
@@ -186,4 +271,25 @@ public class RegistrationService {
             return cb.and(predicates.toArray(new Predicate[0]));
         };
     }
+    @Transactional
+    public RegistrationResponse requestRegistrationByEmail(
+            Long workshopId,
+            String email,
+            SubmissionSource source) {
+
+        if (!StringUtils.hasText(email)) {
+            throw new BusinessRuleException("Email is required");
+        }
+
+        String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
+
+        User user = userRepository.findByEmail(normalizedEmail)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "No user found with email: " + normalizedEmail
+                        ));
+
+        return register(user.getId(), workshopId, source == null ? SubmissionSource.FORM_WEBHOOK : source);
+    }
+   
 }

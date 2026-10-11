@@ -20,4 +20,10 @@ public class RegistrationEmailListener {
     public void onRegistrationConfirmed(RegistrationConfirmedEvent event) {
         emailService.sendRegistrationConfirmation(event);
     }
+
+    @Async
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onRegistrationRejected(RegistrationRejectedEvent event) {
+        emailService.sendRegistrationRejection(event);
+    }
 }

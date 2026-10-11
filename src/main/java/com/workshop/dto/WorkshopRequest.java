@@ -52,6 +52,13 @@ public record WorkshopRequest(
         @Size(max = 500)
         @Pattern(regexp = "^(https?://\\S+)?$", message = "must be a valid http(s) URL") String meetingLink,
 
+        @Schema(example = "https://docs.google.com/forms/d/e/1FAIpQLSd.../viewform",
+                description = "Google Form users fill in to request a seat", requiredMode = Schema.RequiredMode.REQUIRED)
+        @NotBlank @Size(max = 500)
+        @Pattern(regexp = "^https://(docs\\.google\\.com/forms/|forms\\.gle/)\\S+$",
+                message = "must be a Google Form link (https://docs.google.com/forms/... or https://forms.gle/...)")
+        String registrationFormUrl,
+
         @Schema(example = "60", requiredMode = Schema.RequiredMode.REQUIRED)
         @NotNull @Min(1) @Max(10000) Integer capacity,
 

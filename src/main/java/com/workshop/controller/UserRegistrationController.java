@@ -1,7 +1,9 @@
 package com.workshop.controller;
 
 import com.workshop.dto.PageResponse;
+import com.workshop.dto.RegistrationFormResponse;
 import com.workshop.dto.RegistrationResponse;
+import com.workshop.exception.BusinessRuleException;
 import com.workshop.entity.RegistrationStatus;
 import com.workshop.security.AppUserPrincipal;
 import com.workshop.service.RegistrationService;
@@ -13,6 +15,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import java.util.Set;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -32,16 +35,36 @@ public class UserRegistrationController {
     static final Set<String> SORT_FIELDS = Set.of("registeredAt", "status", "id");
 
     private final RegistrationService registrationService;
+    private final boolean allowUserClaim;
 
-    public UserRegistrationController(RegistrationService registrationService) {
+    public UserRegistrationController(RegistrationService registrationService,
+                                      @Value("${app.google-form.allow-user-claim:true}") boolean allowUserClaim) {
         this.registrationService = registrationService;
+        this.allowUserClaim = allowUserClaim;
+    }
+
+    @GetMapping("/api/workshops/{workshopId}/registration-form")
+    @Operation(summary = "Get the Google Form link for a workshop",
+            description = "Step 1: open the returned formUrl and fill it in with your account email. When the form "
+                    + "is submitted the request reaches the admin as PENDING (via the webhook). Fails if the workshop "
+                    + "is not open, full, or you already have an active registration.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Form link"),
+            @ApiResponse(responseCode = "404", description = "Workshop not found"),
+            @ApiResponse(responseCode = "409", description = "Already registered/pending, or workshop is full"),
+            @ApiResponse(responseCode = "422", description = "Workshop not open for registration")
+    })
+    public RegistrationFormResponse registrationForm(@PathVariable Long workshopId,
+            @Parameter(hidden = true) @AuthenticationPrincipal AppUserPrincipal me) {
+        return registrationService.getRegistrationForm(me.id(), workshopId);
     }
 
     @PostMapping("/api/workshops/{workshopId}/registrations")
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Register the current user for a workshop",
-            description = "Fails if the workshop is full, cancelled, unpublished, past its registration deadline, "
-                    + "or the user is already registered. A confirmation email is sent after success.")
+    @Operation(summary = "Confirm that I submitted the Google Form (fallback)",
+            description = "Fallback for when the form webhook did not create the request. The server cannot verify "
+                    + "the form was filled in, so the admin should check the form responses. Fails if the workshop is full, cancelled, unpublished, past its registration deadline, "
+                    + "or the user is already registered. The registration is created as PENDING; an email is sent after an admin approves or rejects it.")
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Registered"),
             @ApiResponse(responseCode = "404", description = "Workshop not found"),
@@ -50,6 +73,9 @@ public class UserRegistrationController {
     })
     public RegistrationResponse register(@PathVariable Long workshopId,
                                          @Parameter(hidden = true) @AuthenticationPrincipal AppUserPrincipal me) {
+        if (!allowUserClaim) {
+            throw new BusinessRuleException("Requests are created automatically when you submit the Google Form");
+        }
         return registrationService.register(me.id(), workshopId);
     }
 
@@ -80,7 +106,7 @@ public class UserRegistrationController {
 
     @DeleteMapping("/api/registrations/me/{registrationId}")
     @Operation(summary = "Cancel one of my registrations",
-            description = "Allowed only while the registration is CONFIRMED and the workshop has not started. "
+            description = "Allowed while the registration is PENDING or CONFIRMED and the workshop has not started. "
                     + "The registration is kept with status CANCELLED and the seat is freed.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Registration cancelled"),

@@ -2,6 +2,7 @@ package com.workshop.dto;
 
 import com.workshop.entity.Registration;
 import com.workshop.entity.RegistrationStatus;
+import com.workshop.entity.SubmissionSource;
 import com.workshop.entity.User;
 import io.swagger.v3.oas.annotations.media.Schema;
 import java.time.Instant;
@@ -12,6 +13,9 @@ public record AdminRegistrationResponse(
         @Schema(example = "CONFIRMED") RegistrationStatus status,
         Instant registeredAt,
         Instant cancelledAt,
+        @Schema(description = "FORM_WEBHOOK = Google Form submission verified by the server; "
+                + "WEB_APP = user clicked \"I submitted\" (check the form responses)")
+        SubmissionSource submissionSource,
         Participant participant,
         WorkshopSummary workshop) {
 
@@ -29,6 +33,6 @@ public record AdminRegistrationResponse(
 
     public static AdminRegistrationResponse from(Registration r) {
         return new AdminRegistrationResponse(r.getId(), r.getStatus(), r.getRegisteredAt(), r.getCancelledAt(),
-                Participant.from(r.getUser()), WorkshopSummary.from(r.getWorkshop()));
+                r.getSubmissionSource(), Participant.from(r.getUser()), WorkshopSummary.from(r.getWorkshop()));
     }
 }

@@ -9,7 +9,7 @@ import java.time.Instant;
         + "The online meeting link is only included while the registration is CONFIRMED.")
 public record RegistrationResponse(
         @Schema(example = "15") Long id,
-        @Schema(example = "CONFIRMED") RegistrationStatus status,
+        @Schema(example = "PENDING", description = "PENDING until an admin confirms or rejects the registration") RegistrationStatus status,
         Instant registeredAt,
         Instant cancelledAt,
         @Schema(description = "True when the user may still cancel this registration") boolean cancellable,

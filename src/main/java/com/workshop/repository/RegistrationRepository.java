@@ -21,10 +21,15 @@ public interface RegistrationRepository
 
     Optional<Registration> findByUserIdAndWorkshopId(Long userId, Long workshopId);
 
+    @Query("select r.workshop.id from Registration r where r.id = :registrationId")
+    Optional<Long> findWorkshopIdByRegistrationId(@Param("registrationId") Long registrationId);
+
     @EntityGraph(attributePaths = {"workshop", "user"})
     Optional<Registration> findByIdAndUserId(Long id, Long userId);
 
     long countByWorkshopIdAndStatus(Long workshopId, RegistrationStatus status);
+
+    long countByWorkshopIdAndStatusIn(Long workshopId, Collection<RegistrationStatus> statuses);
 
     @Override
     @EntityGraph(attributePaths = {"workshop", "user"})
@@ -35,11 +40,16 @@ public interface RegistrationRepository
     List<Object[]> countByWorkshopIds(@Param("ids") Collection<Long> ids,
                                       @Param("status") RegistrationStatus status);
 
+    @Query("select r.workshop.id, count(r) from Registration r "
+            + "where r.workshop.id in :ids and r.status in :statuses group by r.workshop.id")
+    List<Object[]> countByWorkshopIdsAndStatusIn(@Param("ids") Collection<Long> ids,
+                                                 @Param("statuses") Collection<RegistrationStatus> statuses);
+
     @Modifying(flushAutomatically = true)
     @Query("update Registration r set r.status = :cancelled, r.cancelledAt = :now "
-            + "where r.workshop.id = :workshopId and r.status = :confirmed")
+            + "where r.workshop.id = :workshopId and r.status in :activeStatuses")
     int cancelAllForWorkshop(@Param("workshopId") Long workshopId,
                              @Param("now") Instant now,
                              @Param("cancelled") RegistrationStatus cancelled,
-                             @Param("confirmed") RegistrationStatus confirmed);
+                             @Param("activeStatuses") Collection<RegistrationStatus> activeStatuses);
 }

@@ -48,6 +48,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/workshops", "/api/workshops/{id}").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/contact").permitAll()
+                        // Called by the Google Form Apps Script; protected by the X-Webhook-Secret header instead of a JWT.
+                        .requestMatchers(HttpMethod.POST, "/api/integrations/google-forms/submissions").permitAll()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")

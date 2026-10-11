@@ -100,7 +100,7 @@ class RegistrationConcurrencyTest {
 
         assertThat(succeeded.get()).isEqualTo(CAPACITY);
         assertThat(rejectedFull.get()).isEqualTo(CONTENDERS - CAPACITY);
-        assertThat(registrationRepository.countByWorkshopIdAndStatus(workshopId, RegistrationStatus.CONFIRMED))
-                .isEqualTo(CAPACITY);
+        assertThat(registrationRepository.countByWorkshopIdAndStatusIn(workshopId,
+                List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED))).isEqualTo(CAPACITY);
     }
 }

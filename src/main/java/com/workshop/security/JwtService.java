@@ -22,8 +22,11 @@ public class JwtService {
 
     public JwtService(AppProperties props) {
         String secret = props.jwt().secret();
-        if (secret == null || secret.getBytes(StandardCharsets.UTF_8).length < 32) {
-            throw new IllegalStateException("JWT_SECRET must be set and at least 32 characters long");
+        int length = secret == null ? 0 : secret.getBytes(StandardCharsets.UTF_8).length;
+        if (length < 32) {
+            throw new IllegalStateException("JWT_SECRET must be at least 32 characters long, but it is "
+                    + (length == 0 ? "empty or not set" : length + " characters")
+                    + ". Set a longer value in your .env file or environment.");
         }
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.lifetime = Duration.ofMinutes(props.jwt().expirationMinutes());

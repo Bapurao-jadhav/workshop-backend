@@ -70,10 +70,15 @@ class RegistrationServiceTest {
         workshop.setEndTime(LocalTime.of(16, 0));
         workshop.setRegistrationDeadline(LocalDateTime.of(2026, 12, 10, 18, 0));
         workshop.setVenue("Hall A");
+        workshop.setRegistrationFormUrl("https://docs.google.com/forms/d/e/abc/viewform");
 
         when(workshops.findByIdForUpdate(1L)).thenReturn(Optional.of(workshop));
+        when(workshops.findById(1L)).thenReturn(Optional.of(workshop));
         when(users.findById(5L)).thenReturn(Optional.of(user));
         when(registrations.findByUserIdAndWorkshopId(5L, 1L)).thenReturn(Optional.empty());
+        when(registrations.findWorkshopIdByRegistrationId(99L)).thenReturn(Optional.of(1L));
+        when(registrations.countByWorkshopIdAndStatusIn(1L,
+                java.util.List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED))).thenReturn(0L);
         when(registrations.countByWorkshopIdAndStatus(1L, RegistrationStatus.CONFIRMED)).thenReturn(0L);
         when(registrations.saveAndFlush(any(Registration.class))).thenAnswer(inv -> {
             Registration r = inv.getArgument(0);
@@ -85,19 +90,109 @@ class RegistrationServiceTest {
     }
 
     @Test
-    void registersAndPublishesConfirmationEvent() {
+    void registersAsPendingWithoutSendingDecisionEmail() {
         RegistrationResponse response = service.register(5L, 1L);
 
         assertThat(response.id()).isEqualTo(99L);
-        assertThat(response.status()).isEqualTo(RegistrationStatus.CONFIRMED);
+        assertThat(response.status()).isEqualTo(RegistrationStatus.PENDING);
         assertThat(response.cancellable()).isTrue();
 
+        verify(publisher, never()).publishEvent(any(Object.class));
+    }
+
+    @Test
+    void registrationRecordsItsSubmissionSource() {
+        service.register(5L, 1L);
+        ArgumentCaptor<Registration> web = ArgumentCaptor.forClass(Registration.class);
+        verify(registrations).saveAndFlush(web.capture());
+        assertThat(web.getValue().getSubmissionSource()).isEqualTo(com.workshop.entity.SubmissionSource.WEB_APP);
+    }
+
+    @Test
+    void webhookSubmissionByEmailCreatesPendingRequestWithWebhookSource() {
+        when(users.findByEmail("asha@example.com")).thenReturn(Optional.of(user));
+
+        RegistrationResponse response = service.requestRegistrationByEmail(1L, "  Asha@Example.com ",
+                com.workshop.entity.SubmissionSource.FORM_WEBHOOK);
+
+        assertThat(response.status()).isEqualTo(RegistrationStatus.PENDING);
+        ArgumentCaptor<Registration> saved = ArgumentCaptor.forClass(Registration.class);
+        verify(registrations).saveAndFlush(saved.capture());
+        assertThat(saved.getValue().getSubmissionSource())
+                .isEqualTo(com.workshop.entity.SubmissionSource.FORM_WEBHOOK);
+    }
+
+    @Test
+    void webhookSubmissionForUnknownEmailIsNotFound() {
+        when(users.findByEmail("nobody@example.com")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.requestRegistrationByEmail(1L, "nobody@example.com",
+                com.workshop.entity.SubmissionSource.FORM_WEBHOOK))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void registrationFormReturnsTheWorkshopsGoogleForm() {
+        var form = service.getRegistrationForm(5L, 1L);
+
+        assertThat(form.formUrl()).isEqualTo("https://docs.google.com/forms/d/e/abc/viewform");
+        assertThat(form.workshopId()).isEqualTo(1L);
+    }
+
+    @Test
+    void registrationFormRejectsWorkshopWithoutFormOrNotPublished() {
+        workshop.setRegistrationFormUrl(null);
+        assertThatThrownBy(() -> service.getRegistrationForm(5L, 1L)).isInstanceOf(BusinessRuleException.class);
+
+        workshop.setRegistrationFormUrl("https://forms.gle/abc");
+        workshop.setStatus(WorkshopStatus.UNPUBLISHED);
+        assertThatThrownBy(() -> service.getRegistrationForm(5L, 1L)).isInstanceOf(BusinessRuleException.class);
+    }
+
+    @Test
+    void registrationFormConflictsWhenAlreadyPending() {
+        Registration pending = new Registration();
+        pending.setStatus(RegistrationStatus.PENDING);
+        when(registrations.findByUserIdAndWorkshopId(5L, 1L)).thenReturn(Optional.of(pending));
+
+        assertThatThrownBy(() -> service.getRegistrationForm(5L, 1L)).isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void adminApprovalConfirmsPendingRegistrationAndPublishesConfirmationEvent() {
+        Registration pending = new Registration();
+        pending.setId(99L);
+        pending.setUser(user);
+        pending.setWorkshop(workshop);
+        pending.setStatus(RegistrationStatus.PENDING);
+        pending.setRegisteredAt(Instant.now(NOW));
+        when(registrations.findById(99L)).thenReturn(Optional.of(pending));
+
+        var response = service.decideRegistration(99L, RegistrationStatus.CONFIRMED);
+
+        assertThat(response.status()).isEqualTo(RegistrationStatus.CONFIRMED);
         ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
         verify(publisher).publishEvent(captor.capture());
-        RegistrationConfirmedEvent event = (RegistrationConfirmedEvent) captor.getValue();
-        assertThat(event.registrationId()).isEqualTo(99L);
-        assertThat(event.userEmail()).isEqualTo("asha@example.com");
-        assertThat(event.workshopTitle()).isEqualTo("Java Bootcamp");
+        assertThat(captor.getValue()).isInstanceOf(RegistrationConfirmedEvent.class);
+        assertThat(((RegistrationConfirmedEvent) captor.getValue()).userEmail()).isEqualTo("asha@example.com");
+    }
+
+    @Test
+    void adminRejectionRejectsPendingRegistrationAndPublishesRejectionEvent() {
+        Registration pending = new Registration();
+        pending.setId(99L);
+        pending.setUser(user);
+        pending.setWorkshop(workshop);
+        pending.setStatus(RegistrationStatus.PENDING);
+        pending.setRegisteredAt(Instant.now(NOW));
+        when(registrations.findById(99L)).thenReturn(Optional.of(pending));
+
+        var response = service.decideRegistration(99L, RegistrationStatus.REJECTED);
+
+        assertThat(response.status()).isEqualTo(RegistrationStatus.REJECTED);
+        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+        verify(publisher).publishEvent(captor.capture());
+        assertThat(captor.getValue()).isInstanceOf(RegistrationRejectedEvent.class);
     }
 
     @Test
@@ -116,7 +211,8 @@ class RegistrationServiceTest {
 
     @Test
     void rejectsWhenWorkshopIsFull() {
-        when(registrations.countByWorkshopIdAndStatus(1L, RegistrationStatus.CONFIRMED)).thenReturn(2L);
+        when(registrations.countByWorkshopIdAndStatusIn(1L,
+                java.util.List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED))).thenReturn(2L);
 
         assertThatThrownBy(() -> service.register(5L, 1L))
                 .isInstanceOf(ConflictException.class)
@@ -170,7 +266,7 @@ class RegistrationServiceTest {
         RegistrationResponse response = service.register(5L, 1L);
 
         assertThat(response.id()).isEqualTo(7L);
-        assertThat(response.status()).isEqualTo(RegistrationStatus.CONFIRMED);
+        assertThat(response.status()).isEqualTo(RegistrationStatus.PENDING);
         assertThat(response.cancelledAt()).isNull();
     }
 

@@ -43,23 +43,56 @@ class EmailServiceTest {
 
     @Test
     void sendsEmailWhenSmtpIsConfigured() {
-        EmailService service = new EmailService(provider, props, "smtp.example.com");
+        EmailService service = new EmailService(provider, props, "smtp.example.com", "");
 
         assertThat(service.sendRegistrationConfirmation(event)).isTrue();
         verify(sender).send(any(MimeMessage.class));
     }
 
     @Test
+    void sendsRejectionEmailWhenSmtpIsConfigured() {
+        RegistrationRejectedEvent rejected = new RegistrationRejectedEvent(42L, "Asha Patil", "asha@example.com",
+                "Java Bootcamp", LocalDate.of(2026, 12, 15), LocalTime.of(10, 0),
+                LocalTime.of(16, 30), "Hall A");
+        EmailService service = new EmailService(provider, props, "smtp.gmail.com", "");
+
+        assertThat(service.sendRegistrationRejection(rejected)).isTrue();
+        verify(sender).send(any(MimeMessage.class));
+    }
+
+    @Test
+    void fallsBackToSmtpUsernameWhenMailFromIsEmpty() throws Exception {
+        AppProperties noFrom = new AppProperties(props.jwt(), props.cors(), props.admin(),
+                new AppProperties.Mail(""), "UTC");
+        EmailService service = new EmailService(provider, noFrom, "smtp.gmail.com", "client@gmail.com");
+
+        assertThat(service.sendRegistrationConfirmation(event)).isTrue();
+        org.mockito.ArgumentCaptor<MimeMessage> captor = org.mockito.ArgumentCaptor.forClass(MimeMessage.class);
+        verify(sender).send(captor.capture());
+        assertThat(captor.getValue().getFrom()[0].toString()).isEqualTo("client@gmail.com");
+    }
+
+    @Test
+    void skipsWhenNoSenderAddressCanBeResolved() {
+        AppProperties noFrom = new AppProperties(props.jwt(), props.cors(), props.admin(),
+                new AppProperties.Mail(""), "UTC");
+        EmailService service = new EmailService(provider, noFrom, "smtp.gmail.com", "");
+
+        assertThat(service.sendRegistrationConfirmation(event)).isFalse();
+        verify(sender, never()).send(any(MimeMessage.class));
+    }
+
+    @Test
     void swallowsSmtpFailures() {
         doThrow(new MailSendException("SMTP down")).when(sender).send(any(MimeMessage.class));
-        EmailService service = new EmailService(provider, props, "smtp.example.com");
+        EmailService service = new EmailService(provider, props, "smtp.example.com", "");
 
         assertThat(service.sendRegistrationConfirmation(event)).isFalse();
     }
 
     @Test
     void skipsSilentlyWithoutSmtpHost() {
-        EmailService service = new EmailService(provider, props, "");
+        EmailService service = new EmailService(provider, props, "", "");
 
         assertThat(service.sendRegistrationConfirmation(event)).isFalse();
         verify(sender, never()).send(any(MimeMessage.class));

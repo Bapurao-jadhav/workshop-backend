@@ -57,7 +57,7 @@ public class WorkshopService {
         Workshop w = workshopRepository.findById(id)
                 .filter(x -> x.getStatus() == WorkshopStatus.PUBLISHED)
                 .orElseThrow(() -> new ResourceNotFoundException("Workshop not found"));
-        return toResponse(w, confirmedCount(w.getId()), false);
+        return toResponse(w, confirmedCount(w.getId()), activeRegistrationCount(w.getId()), false);
     }
 
     // ------------------------------------------------------------------ admin
@@ -73,7 +73,7 @@ public class WorkshopService {
     public WorkshopResponse getForAdmin(Long id) {
         Workshop w = workshopRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Workshop not found"));
-        return toResponse(w, confirmedCount(id), true);
+        return toResponse(w, confirmedCount(id), activeRegistrationCount(id), true);
     }
 
     @Transactional
@@ -90,7 +90,7 @@ public class WorkshopService {
         apply(w, request);
         w.setStatus(WorkshopStatus.DRAFT);
         workshopRepository.saveAndFlush(w);
-        return toResponse(w, 0, true);
+        return toResponse(w, 0, 0, true);
     }
 
     @Transactional
@@ -101,13 +101,14 @@ public class WorkshopService {
         }
         validateSchedule(request);
         long confirmed = confirmedCount(id);
-        if (request.capacity() < confirmed) {
-            throw new BusinessRuleException("Capacity cannot be lower than the current number of participants ("
-                    + confirmed + ")");
+        long active = activeRegistrationCount(id);
+        if (request.capacity() < active) {
+            throw new BusinessRuleException("Capacity cannot be lower than the current number of active registrations ("
+                    + active + ")");
         }
         apply(w, request);
         workshopRepository.saveAndFlush(w);
-        return toResponse(w, confirmed, true);
+        return toResponse(w, confirmed, active, true);
     }
 
     @Transactional
@@ -123,6 +124,9 @@ public class WorkshopService {
                     if (!w.startsAt().isAfter(LocalDateTime.now(clock))) {
                         throw new BusinessRuleException("A workshop that has already started cannot be published");
                     }
+                    if (!StringUtils.hasText(w.getRegistrationFormUrl())) {
+                        throw new BusinessRuleException("Add the Google Form link before publishing this workshop");
+                    }
                     w.setStatus(WorkshopStatus.PUBLISHED);
                 }
                 case UNPUBLISHED -> {
@@ -134,14 +138,15 @@ public class WorkshopService {
                 case CANCELLED -> {
                     w.setStatus(WorkshopStatus.CANCELLED);
                     registrationRepository.cancelAllForWorkshop(id, Instant.now(clock),
-                            RegistrationStatus.CANCELLED, RegistrationStatus.CONFIRMED);
+                            RegistrationStatus.CANCELLED,
+                            java.util.List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED));
                 }
                 case DRAFT -> throw new BusinessRuleException("A workshop cannot be moved back to DRAFT");
                 default -> throw new BusinessRuleException("Unsupported status");
             }
             workshopRepository.saveAndFlush(w);
         }
-        return toResponse(w, confirmedCount(id), true);
+        return toResponse(w, confirmedCount(id), activeRegistrationCount(id), true);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -175,6 +180,7 @@ public class WorkshopService {
         w.setRegistrationDeadline(r.registrationDeadline());
         w.setVenue(blankToNull(r.venue()));
         w.setMeetingLink(blankToNull(r.meetingLink()));
+        w.setRegistrationFormUrl(blankToNull(r.registrationFormUrl()));
         w.setCapacity(r.capacity());
         w.setFee(r.fee());
         w.setImageUrl(blankToNull(r.imageUrl()));
@@ -188,22 +194,33 @@ public class WorkshopService {
         return registrationRepository.countByWorkshopIdAndStatus(workshopId, RegistrationStatus.CONFIRMED);
     }
 
-    private WorkshopResponse toResponse(Workshop w, long confirmed, boolean includeMeetingLink) {
+    private long activeRegistrationCount(Long workshopId) {
+        return registrationRepository.countByWorkshopIdAndStatusIn(workshopId,
+                java.util.List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED));
+    }
+
+    private WorkshopResponse toResponse(Workshop w, long confirmed, long active, boolean includeMeetingLink) {
         boolean open = w.getStatus() == WorkshopStatus.PUBLISHED
                 && LocalDateTime.now(clock).isBefore(w.getRegistrationDeadline())
-                && confirmed < w.getCapacity();
-        return WorkshopResponse.from(w, confirmed, open, includeMeetingLink);
+                && active < w.getCapacity();
+        return WorkshopResponse.from(w, confirmed, active, open, includeMeetingLink);
     }
 
     private PageResponse<WorkshopResponse> toPage(Page<Workshop> page, boolean admin) {
-        Map<Long, Long> counts = new HashMap<>();
+        Map<Long, Long> confirmedCounts = new HashMap<>();
+        Map<Long, Long> activeCounts = new HashMap<>();
         List<Long> ids = page.getContent().stream().map(Workshop::getId).toList();
         if (!ids.isEmpty()) {
             for (Object[] row : registrationRepository.countByWorkshopIds(ids, RegistrationStatus.CONFIRMED)) {
-                counts.put((Long) row[0], (Long) row[1]);
+                confirmedCounts.put((Long) row[0], (Long) row[1]);
+            }
+            for (Object[] row : registrationRepository.countByWorkshopIdsAndStatusIn(ids,
+                    java.util.List.of(RegistrationStatus.PENDING, RegistrationStatus.CONFIRMED))) {
+                activeCounts.put((Long) row[0], (Long) row[1]);
             }
         }
-        return PageResponse.of(page, w -> toResponse(w, counts.getOrDefault(w.getId(), 0L), admin));
+        return PageResponse.of(page, w -> toResponse(w, confirmedCounts.getOrDefault(w.getId(), 0L),
+                activeCounts.getOrDefault(w.getId(), 0L), admin));
     }
 
     private static Specification<Workshop> filter(String q, String category, String audience, LocalDate from,

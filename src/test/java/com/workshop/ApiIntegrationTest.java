@@ -186,10 +186,18 @@ class ApiIntegrationTest {
         MvcResult created = mvc.perform(post("/api/workshops/" + workshopId + "/registrations")
                         .header("Authorization", "Bearer " + alice))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.status").value("CONFIRMED"))
+                .andExpect(jsonPath("$.status").value("PENDING"))
                 .andExpect(jsonPath("$.workshop.meetingLink").value("https://meet.example.com/room"))
                 .andReturn();
         long registrationId = json.readTree(created.getResponse().getContentAsString()).get("id").asLong();
+
+        // The admin approves Alice; this triggers the confirmation email after commit when SMTP is configured.
+        mvc.perform(patch("/api/admin/registrations/" + registrationId + "/status")
+                        .header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"CONFIRMED\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CONFIRMED"));
 
         // Duplicate -> 409, workshop is now full for Bob -> 409
         mvc.perform(post("/api/workshops/" + workshopId + "/registrations")
@@ -238,9 +246,18 @@ class ApiIntegrationTest {
                 .andExpect(jsonPath("$.status").value("CANCELLED"));
         mvc.perform(delete("/api/registrations/me/" + registrationId).header("Authorization", "Bearer " + alice))
                 .andExpect(status().isUnprocessableEntity());
-        mvc.perform(post("/api/workshops/" + workshopId + "/registrations")
+        MvcResult bobCreated = mvc.perform(post("/api/workshops/" + workshopId + "/registrations")
                         .header("Authorization", "Bearer " + bob))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andReturn();
+        long bobRegistrationId = json.readTree(bobCreated.getResponse().getContentAsString()).get("id").asLong();
+        mvc.perform(patch("/api/admin/registrations/" + bobRegistrationId + "/status")
+                        .header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"CONFIRMED\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CONFIRMED"));
 
         // Cancelling the workshop cancels Bob's registration too and blocks new ones
         patchStatus(admin, workshopId, "CANCELLED").andExpect(status().isOk());
@@ -311,12 +328,97 @@ class ApiIntegrationTest {
 
     // ------------------------------------------------------------------ helpers
 
+    // ------------------------------------------------------------------ Google Form flow
+
+    @Test
+    void googleFormFlowFromFormLinkToApprovedRegistration() throws Exception {
+        String admin = login("admin@test.com", "AdminPass123");
+        long workshopId = createWorkshop(admin, 5, null);
+        publish(admin, workshopId);
+        String email = uniqueEmail();
+        String user = registerUserWithEmail(email);
+
+        // Public response hides the form link; the user gets it from the dedicated endpoint
+        mvc.perform(get("/api/workshops/" + workshopId)).andExpect(jsonPath("$.registrationFormUrl").doesNotExist());
+        mvc.perform(get("/api/workshops/" + workshopId + "/registration-form"))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/workshops/" + workshopId + "/registration-form")
+                        .header("Authorization", "Bearer " + user))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.formUrl").value("https://docs.google.com/forms/d/e/1FAIpQLSdExample/viewform"));
+
+        // Webhook: needs the secret, no JWT
+        String payload = json.writeValueAsString(Map.of("workshopId", workshopId, "email", email));
+        mvc.perform(post("/api/integrations/google-forms/submissions").contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/integrations/google-forms/submissions").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Webhook-Secret", "wrong").content(payload))
+                .andExpect(status().isUnauthorized());
+        MvcResult created = mvc.perform(post("/api/integrations/google-forms/submissions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Webhook-Secret", "test-webhook-secret").content(payload))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andReturn();
+        long registrationId = json.readTree(created.getResponse().getContentAsString()).get("id").asLong();
+
+        // Repeat submission and an unknown email
+        mvc.perform(post("/api/integrations/google-forms/submissions").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Webhook-Secret", "test-webhook-secret").content(payload))
+                .andExpect(status().isConflict());
+        mvc.perform(post("/api/integrations/google-forms/submissions").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Webhook-Secret", "test-webhook-secret")
+                        .content(json.writeValueAsString(Map.of("workshopId", workshopId,
+                                "email", "nobody-" + UUID.randomUUID() + "@test.com"))))
+                .andExpect(status().isNotFound());
+
+        // Form endpoint now conflicts; admin sees the verified source and approves
+        mvc.perform(get("/api/workshops/" + workshopId + "/registration-form")
+                        .header("Authorization", "Bearer " + user))
+                .andExpect(status().isConflict());
+        mvc.perform(get("/api/admin/registrations?workshopId=" + workshopId).header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].submissionSource").value("FORM_WEBHOOK"));
+        mvc.perform(patch("/api/admin/registrations/" + registrationId + "/status")
+                        .header("Authorization", "Bearer " + admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"CONFIRMED\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CONFIRMED"));
+    }
+
+    @Test
+    void workshopRequiresAGoogleFormLinkAndAdminSeesIt() throws Exception {
+        String admin = login("admin@test.com", "AdminPass123");
+
+        Map<String, Object> missing = workshopBody(10, null);
+        missing.remove("registrationFormUrl");
+        mvc.perform(post("/api/admin/workshops").header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(missing)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("registrationFormUrl"));
+
+        Map<String, Object> notGoogle = workshopBody(10, null);
+        notGoogle.put("registrationFormUrl", "https://example.com/form");
+        mvc.perform(post("/api/admin/workshops").header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(notGoogle)))
+                .andExpect(status().isBadRequest());
+
+        long id = createWorkshop(admin, 10, null);
+        mvc.perform(get("/api/admin/workshops/" + id).header("Authorization", "Bearer " + admin))
+                .andExpect(jsonPath("$.registrationFormUrl")
+                        .value("https://docs.google.com/forms/d/e/1FAIpQLSdExample/viewform"));
+    }
+
     private String uniqueEmail() {
         return "user-" + UUID.randomUUID() + "@example.com";
     }
 
     private String registerUser() throws Exception {
-        String email = uniqueEmail();
+        return registerUserWithEmail(uniqueEmail());
+    }
+
+    private String registerUserWithEmail(String email) throws Exception {
         MvcResult res = mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of("name", "Test User", "email", email,
                                 "password", PASSWORD))))
@@ -350,6 +452,7 @@ class ApiIntegrationTest {
         if (meetingLink != null) {
             body.put("meetingLink", meetingLink);
         }
+        body.put("registrationFormUrl", "https://docs.google.com/forms/d/e/1FAIpQLSdExample/viewform");
         body.put("capacity", capacity);
         body.put("fee", "499.00");
         return body;

@@ -2,6 +2,7 @@ package com.workshop.controller;
 
 import com.workshop.dto.AdminRegistrationResponse;
 import com.workshop.dto.PageResponse;
+import com.workshop.dto.RegistrationStatusRequest;
 import com.workshop.entity.RegistrationStatus;
 import com.workshop.service.RegistrationService;
 import com.workshop.util.PageableFactory;
@@ -11,7 +12,12 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,7 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/admin")
 @SecurityRequirement(name = "bearerAuth")
-@Tag(name = "Admin - Registrations", description = "View participants and registrations (ADMIN role required)")
+@Tag(name = "Admin - Registrations", description = "Review, approve, reject, and list registrations (ADMIN role required)")
 public class AdminRegistrationController {
 
     private final RegistrationService registrationService;
@@ -47,6 +53,21 @@ public class AdminRegistrationController {
         var pageable = PageableFactory.of(page, size, sort, UserRegistrationController.SORT_FIELDS,
                 Sort.by(Sort.Direction.DESC, "registeredAt"));
         return registrationService.listParticipants(workshopId, status, q, pageable);
+    }
+
+    @PatchMapping("/registrations/{registrationId}/status")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Approve or reject a pending registration",
+            description = "Set status to CONFIRMED or REJECTED. Sends the matching email after the database transaction commits.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Registration status updated"),
+            @ApiResponse(responseCode = "404", description = "Registration not found"),
+            @ApiResponse(responseCode = "409", description = "Workshop is full"),
+            @ApiResponse(responseCode = "422", description = "Registration is not pending or status is invalid")
+    })
+    public AdminRegistrationResponse decideRegistration(
+            @PathVariable Long registrationId, @Valid @RequestBody RegistrationStatusRequest request) {
+        return registrationService.decideRegistration(registrationId, request.status());
     }
 
     @GetMapping("/registrations")

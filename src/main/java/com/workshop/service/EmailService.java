@@ -29,26 +29,38 @@ public class EmailService {
     private final ObjectProvider<JavaMailSender> mailSenderProvider;
     private final AppProperties props;
     private final String mailHost;
+    private final String mailUsername;
 
     public EmailService(ObjectProvider<JavaMailSender> mailSenderProvider, AppProperties props,
-                        @Value("${spring.mail.host:}") String mailHost) {
+                        @Value("${spring.mail.host:}") String mailHost,
+                        @Value("${spring.mail.username:}") String mailUsername) {
         this.mailSenderProvider = mailSenderProvider;
         this.props = props;
         this.mailHost = mailHost;
+        this.mailUsername = mailUsername;
+    }
+
+    /** MAIL_FROM when set, otherwise the SMTP login (MAIL_USERNAME), so mail comes from the client's address. */
+    private String fromAddress() {
+        if (props.mail() != null && StringUtils.hasText(props.mail().from())) {
+            return props.mail().from().trim();
+        }
+        return StringUtils.hasText(mailUsername) ? mailUsername.trim() : null;
     }
 
     /** @return true if the email was handed to the SMTP server, false if skipped or failed */
     public boolean sendRegistrationConfirmation(RegistrationConfirmedEvent event) {
         JavaMailSender sender = mailSenderProvider.getIfAvailable();
-        if (sender == null || !StringUtils.hasText(mailHost)) {
-            log.info("SMTP is not configured; skipping confirmation email for registration {}",
-                    event.registrationId());
+        String from = fromAddress();
+        if (sender == null || !StringUtils.hasText(mailHost) || from == null) {
+            log.info("SMTP host or sender address (MAIL_FROM / MAIL_USERNAME) is not configured; "
+                    + "skipping confirmation email for registration {}", event.registrationId());
             return false;
         }
         try {
             MimeMessage message = sender.createMimeMessage();
             MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
-            helper.setFrom(props.mail().from());
+            helper.setFrom(from);
             helper.setTo(event.userEmail());
             helper.setSubject("Registration confirmed: " + event.workshopTitle());
             helper.setText(buildConfirmationHtml(event), true);
@@ -60,6 +72,47 @@ public class EmailService {
                     ex.getMessage());
             return false;
         }
+    }
+
+    /** Sends a rejection notice after an admin rejects a pending registration. */
+    public boolean sendRegistrationRejection(RegistrationRejectedEvent event) {
+        JavaMailSender sender = mailSenderProvider.getIfAvailable();
+        String from = fromAddress();
+        if (sender == null || !StringUtils.hasText(mailHost) || from == null) {
+            log.info("SMTP host or sender address (MAIL_FROM / MAIL_USERNAME) is not configured; "
+                    + "skipping rejection email for registration {}", event.registrationId());
+            return false;
+        }
+        try {
+            MimeMessage message = sender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
+            helper.setFrom(from);
+            helper.setTo(event.userEmail());
+            helper.setSubject("Registration update: " + event.workshopTitle());
+            helper.setText(buildRejectionHtml(event), true);
+            sender.send(message);
+            log.info("Rejection email sent for registration {}", event.registrationId());
+            return true;
+        } catch (Exception ex) {
+            log.warn("Could not send rejection email for registration {}: {}", event.registrationId(), ex.getMessage());
+            return false;
+        }
+    }
+
+    static String buildRejectionHtml(RegistrationRejectedEvent e) {
+        return """
+                <!DOCTYPE html>
+                <html><body style="font-family:Arial,Helvetica,sans-serif;color:#1f2933;line-height:1.6;">
+                  <h2>Registration Update</h2>
+                  <p>Hi %s,</p>
+                  <p>Thank you for your interest in <strong>%s</strong>.</p>
+                  <p>Unfortunately, your registration (#%d) was not approved.</p>
+                  <p>If you believe this is an error, please contact the workshop organizer.</p>
+                  <p>Regards,<br/>Workshop Team</p>
+                  <hr/><small>This is an automated message, please do not reply.</small>
+                </body></html>
+                """.formatted(HtmlUtils.htmlEscape(e.userName()), HtmlUtils.htmlEscape(e.workshopTitle()),
+                e.registrationId());
     }
 
     static String buildConfirmationHtml(RegistrationConfirmedEvent e) {
