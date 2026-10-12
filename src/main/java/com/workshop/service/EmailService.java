@@ -31,6 +31,9 @@ public class EmailService {
     private final String mailHost;
     private final String mailUsername;
 
+    @Value("${app.frontend.url:http://localhost:5173}")
+    private String frontendUrl;
+
     public EmailService(ObjectProvider<JavaMailSender> mailSenderProvider, AppProperties props,
                         @Value("${spring.mail.host:}") String mailHost,
                         @Value("${spring.mail.username:}") String mailUsername) {
@@ -72,6 +75,50 @@ public class EmailService {
                     ex.getMessage());
             return false;
         }
+    }
+
+    /** Sends a one-time password reset link. SMTP failures are logged and never reveal account existence. */
+    public boolean sendPasswordReset(String recipientEmail, String rawToken) {
+        JavaMailSender sender = mailSenderProvider.getIfAvailable();
+        String from = fromAddress();
+        if (sender == null || !StringUtils.hasText(mailHost) || from == null) {
+            log.info("SMTP host or sender address is not configured; skipping password reset email");
+            return false;
+        }
+        try {
+            String baseUrl = StringUtils.hasText(frontendUrl) ? frontendUrl.trim() : "http://localhost:5173";
+            while (baseUrl.endsWith("/")) {
+                baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+            }
+            String resetUrl = baseUrl + "/reset-password?token=" + rawToken;
+            MimeMessage message = sender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
+            helper.setFrom(from);
+            helper.setTo(recipientEmail);
+            helper.setSubject("Reset password");
+            helper.setText(buildPasswordResetHtml(resetUrl), true);
+            sender.send(message);
+            log.info("Password reset email handed to SMTP server");
+            return true;
+        } catch (Exception ex) {
+            log.warn("Could not send password reset email: {}", ex.getMessage());
+            return false;
+        }
+    }
+
+    static String buildPasswordResetHtml(String resetUrl) {
+        String safeUrl = HtmlUtils.htmlEscape(resetUrl);
+        return """
+                <!DOCTYPE html>
+                <html><body style="font-family:Arial,Helvetica,sans-serif;color:#1f2933;line-height:1.6;">
+                  <h2>Reset your password</h2>
+                  <p>We received a request to reset the password for your account.</p>
+                  <p><a href="%s" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:6px;font-weight:bold;">Reset password</a></p>
+                  <p>This link expires in 30 minutes and can be used only once.</p>
+                  <p>If you did not request this, you can safely ignore this email.</p>
+                  <hr/><small>This is an automated message, please do not reply.</small>
+                </body></html>
+                """.formatted(safeUrl);
     }
 
     /** Sends a rejection notice after an admin rejects a pending registration. */

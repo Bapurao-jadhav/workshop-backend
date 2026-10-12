@@ -45,7 +45,8 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/error").permitAll()
-                        .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
+                        .requestMatchers("/api/auth/register", "/api/auth/login",
+                                "/api/auth/forgot-password", "/api/auth/reset-password").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/workshops", "/api/workshops/{id}").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/contact").permitAll()
                         // Called by the Google Form Apps Script; protected by the X-Webhook-Secret header instead of a JWT.

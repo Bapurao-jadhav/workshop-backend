@@ -33,6 +33,8 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
+      - key: FRONTEND_URL
+        sync: false
       - key: APP_TIMEZONE
         value: Asia/Kolkata
       - key: MAIL_HOST

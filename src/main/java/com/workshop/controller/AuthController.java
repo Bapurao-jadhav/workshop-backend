@@ -1,8 +1,10 @@
 package com.workshop.controller;
 
 import com.workshop.dto.AuthResponse;
+import com.workshop.dto.ForgotPasswordRequest;
 import com.workshop.dto.LoginRequest;
 import com.workshop.dto.RegisterRequest;
+import com.workshop.dto.ResetPasswordRequest;
 import com.workshop.dto.UserResponse;
 import com.workshop.security.AppUserPrincipal;
 import com.workshop.service.AuthService;
@@ -15,6 +17,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -54,6 +57,26 @@ public class AuthController {
     })
     public AuthResponse login(@Valid @RequestBody LoginRequest request) {
         return authService.login(request);
+    }
+
+    @PostMapping("/forgot-password")
+    @Operation(summary = "Request a password reset link (public)",
+            description = "Always returns the same success response whether or not the email belongs to an account.")
+    @ApiResponses(@ApiResponse(responseCode = "200", description = "If the account exists, a reset link has been emailed"))
+    public Map<String, String> forgotPassword(@Valid @RequestBody ForgotPasswordRequest request) {
+        authService.forgotPassword(request);
+        return Map.of("message", "If an account with that email exists, a password reset link has been sent.");
+    }
+
+    @PostMapping("/reset-password")
+    @Operation(summary = "Reset password using a one-time token (public)")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Password reset successfully"),
+            @ApiResponse(responseCode = "400", description = "Invalid, expired, or already-used token, or invalid password")
+    })
+    public Map<String, String> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
+        authService.resetPassword(request);
+        return Map.of("message", "Password has been reset successfully.");
     }
 
     @GetMapping("/me")
