@@ -37,18 +37,10 @@ services:
         sync: false
       - key: APP_TIMEZONE
         value: Asia/Kolkata
-      - key: MAIL_HOST
+      - key: BREVO_API_KEY
         sync: false
-      - key: MAIL_PORT
-        value: "587"
-      - key: MAIL_STARTTLS
-        value: "true"
-      - key: MAIL_SMTP_AUTH
-        value: "true"
-      - key: MAIL_USERNAME
-        sync: false
-      - key: MAIL_PASSWORD
-        sync: false
+      - key: BREVO_SENDER_NAME
+        value: arQnare
       - key: MAIL_FROM
         sync: false
       - key: GOOGLE_FORM_WEBHOOK_SECRET

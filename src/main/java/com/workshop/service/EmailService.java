@@ -1,22 +1,23 @@
 package com.workshop.service;
 
 import com.workshop.config.AppProperties;
-import jakarta.mail.internet.MimeMessage;
+
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
+import org.springframework.http.MediaType;
+import org.springframework.web.client.RestClient;
+import java.util.List;
+import java.util.Map;
 import org.springframework.util.StringUtils;
 import org.springframework.web.util.HtmlUtils;
 
 /**
- * Sends transactional emails. Never throws: a failed email must not break or duplicate a registration.
- * When no SMTP host is configured the email is only logged, so the app runs locally without credentials.
+ * Sends transactional emails through Brevo HTTPS API only. No SMTP fallback is used.
+ * Email failures are logged and do not break registration processing.
  */
 @Service
 public class EmailService {
@@ -26,82 +27,95 @@ public class EmailService {
             DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy", Locale.ENGLISH);
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
 
-    private final ObjectProvider<JavaMailSender> mailSenderProvider;
     private final AppProperties props;
-    private final String mailHost;
-    private final String mailUsername;
+
+    @Value("${BREVO_API_KEY:}")
+    private String brevoApiKey;
+
+    @Value("${app.mail.sender-name:arQnare}")
+    private String brevoSenderName;
 
     @Value("${app.frontend.url:http://localhost:5173}")
     private String frontendUrl;
 
-    public EmailService(ObjectProvider<JavaMailSender> mailSenderProvider, AppProperties props,
-                        @Value("${spring.mail.host:}") String mailHost,
-                        @Value("${spring.mail.username:}") String mailUsername) {
-        this.mailSenderProvider = mailSenderProvider;
+    public EmailService(AppProperties props) {
         this.props = props;
-        this.mailHost = mailHost;
-        this.mailUsername = mailUsername;
     }
 
-    /** MAIL_FROM when set, otherwise the SMTP login (MAIL_USERNAME), so mail comes from the client's address. */
+    /** Brevo requires a verified sender address; never fall back to old SMTP credentials. */
     private String fromAddress() {
-        if (props.mail() != null && StringUtils.hasText(props.mail().from())) {
-            return props.mail().from().trim();
-        }
-        return StringUtils.hasText(mailUsername) ? mailUsername.trim() : null;
+        return props.mail() != null && StringUtils.hasText(props.mail().from())
+                ? props.mail().from().trim()
+                : null;
     }
 
-    /** @return true if the email was handed to the SMTP server, false if skipped or failed */
+    /** Sends an email using Brevo's HTTPS API (Render blocks outbound SMTP ports on free services). */
     public boolean sendRegistrationConfirmation(RegistrationConfirmedEvent event) {
-        JavaMailSender sender = mailSenderProvider.getIfAvailable();
-        String from = fromAddress();
-        if (sender == null || !StringUtils.hasText(mailHost) || from == null) {
-            log.info("SMTP host or sender address (MAIL_FROM / MAIL_USERNAME) is not configured; "
-                    + "skipping confirmation email for registration {}", event.registrationId());
-            return false;
-        }
-        try {
-            MimeMessage message = sender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
-            helper.setFrom(from);
-            helper.setTo(event.userEmail());
-            helper.setSubject("Registration confirmed: " + event.workshopTitle());
-            helper.setText(buildConfirmationHtml(event), true);
-            sender.send(message);
-            log.info("Confirmation email sent for registration {}", event.registrationId());
-            return true;
-        } catch (Exception ex) {
-            log.warn("Could not send confirmation email for registration {}: {}", event.registrationId(),
-                    ex.getMessage());
-            return false;
-        }
+        return sendHtmlEmail(event.userEmail(),
+                "Registration confirmed: " + event.workshopTitle(),
+                buildConfirmationHtml(event),
+                "confirmation email for registration " + event.registrationId());
     }
 
-    /** Sends a one-time password reset link. SMTP failures are logged and never reveal account existence. */
+    /** Sends a one-time password reset link. Failures never reveal account existence through the API response. */
     public boolean sendPasswordReset(String recipientEmail, String rawToken) {
-        JavaMailSender sender = mailSenderProvider.getIfAvailable();
+        if (!StringUtils.hasText(rawToken)) {
+            log.warn("Password reset email skipped because token is blank");
+            return false;
+        }
+        String baseUrl = StringUtils.hasText(frontendUrl) ? frontendUrl.trim() : "http://localhost:5173";
+        while (baseUrl.endsWith("/")) {
+            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        }
+        String resetUrl = baseUrl + "/reset-password?token="
+                + java.net.URLEncoder.encode(rawToken, java.nio.charset.StandardCharsets.UTF_8);
+        return sendHtmlEmail(recipientEmail, "Reset password", buildPasswordResetHtml(resetUrl),
+                "password reset email");
+    }
+
+    /** Sends a rejection notice after an admin rejects a pending registration. */
+    public boolean sendRegistrationRejection(RegistrationRejectedEvent event) {
+        return sendHtmlEmail(event.userEmail(),
+                "Registration update: " + event.workshopTitle(),
+                buildRejectionHtml(event),
+                "rejection email for registration " + event.registrationId());
+    }
+
+    private boolean sendHtmlEmail(String recipientEmail, String subject, String html, String description) {
         String from = fromAddress();
-        if (sender == null || !StringUtils.hasText(mailHost) || from == null) {
-            log.info("SMTP host or sender address is not configured; skipping password reset email");
+        if (!StringUtils.hasText(brevoApiKey) || from == null || !StringUtils.hasText(recipientEmail)) {
+            log.warn("Brevo email not configured (BREVO_API_KEY and MAIL_FROM are required); skipping {}", description);
             return false;
         }
         try {
-            String baseUrl = StringUtils.hasText(frontendUrl) ? frontendUrl.trim() : "http://localhost:5173";
-            while (baseUrl.endsWith("/")) {
-                baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
-            }
-            String resetUrl = baseUrl + "/reset-password?token=" + rawToken;
-            MimeMessage message = sender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
-            helper.setFrom(from);
-            helper.setTo(recipientEmail);
-            helper.setSubject("Reset password");
-            helper.setText(buildPasswordResetHtml(resetUrl), true);
-            sender.send(message);
-            log.info("Password reset email handed to SMTP server");
+            Map<String, Object> payload = Map.of(
+                    "sender", Map.of("name", StringUtils.hasText(brevoSenderName) ? brevoSenderName : "arQnare",
+                            "email", from),
+                    "to", List.of(Map.of("email", recipientEmail)),
+                    "subject", subject,
+                    "htmlContent", html
+            );
+
+            RestClient.create("https://api.brevo.com")
+                    .post()
+                    .uri("/v3/smtp/email")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .header("api-key", brevoApiKey.trim())
+                    .body(payload)
+                    .retrieve()
+                    .toBodilessEntity();
+
+            log.info("Brevo accepted {}", description);
             return true;
+        } catch (org.springframework.web.client.RestClientResponseException ex) {
+            // Brevo's response body commonly explains invalid keys, unverified senders, or invalid recipients.
+            // Do not log request headers or API keys.
+            log.warn("Brevo rejected {} (HTTP {}): {}", description, ex.getStatusCode().value(),
+                    ex.getResponseBodyAsString());
+            return false;
         } catch (Exception ex) {
-            log.warn("Could not send password reset email: {}", ex.getMessage());
+            log.warn("Could not send {} through Brevo ({}): {}", description,
+                    ex.getClass().getSimpleName(), ex.getMessage());
             return false;
         }
     }
@@ -122,30 +136,7 @@ public class EmailService {
     }
 
     /** Sends a rejection notice after an admin rejects a pending registration. */
-    public boolean sendRegistrationRejection(RegistrationRejectedEvent event) {
-        JavaMailSender sender = mailSenderProvider.getIfAvailable();
-        String from = fromAddress();
-        if (sender == null || !StringUtils.hasText(mailHost) || from == null) {
-            log.info("SMTP host or sender address (MAIL_FROM / MAIL_USERNAME) is not configured; "
-                    + "skipping rejection email for registration {}", event.registrationId());
-            return false;
-        }
-        try {
-            MimeMessage message = sender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
-            helper.setFrom(from);
-            helper.setTo(event.userEmail());
-            helper.setSubject("Registration update: " + event.workshopTitle());
-            helper.setText(buildRejectionHtml(event), true);
-            sender.send(message);
-            log.info("Rejection email sent for registration {}", event.registrationId());
-            return true;
-        } catch (Exception ex) {
-            log.warn("Could not send rejection email for registration {}: {}", event.registrationId(), ex.getMessage());
-            return false;
-        }
-    }
-
+  
     static String buildRejectionHtml(RegistrationRejectedEvent e) {
         return """
                 <!DOCTYPE html>

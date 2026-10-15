@@ -65,3 +65,16 @@ Push the repo, then create a Blueprint from `render.yaml` (it provisions Postgre
 
 ## 7. React / Vercel
 Send `Authorization: Bearer <token>` on protected calls. Errors always look like `{timestamp,status,error,message,path,fieldErrors?}`. Lists are paginated with `page`, `size`, `sort` (`field,asc|desc`).
+
+
+## Transactional email (Brevo)
+
+Render free web services can block outbound SMTP ports, so this project sends transactional messages through Brevo's HTTPS API.
+
+Set these environment variables in Render:
+- `BREVO_API_KEY`: API key created in your Brevo account.
+- `BREVO_SENDER_NAME`: sender display name (defaults to `arQnare`).
+- `MAIL_FROM`: sender email address verified in Brevo.
+- `FRONTEND_URL`: deployed frontend origin; password reset links use `/reset-password?token=...`.
+
+In Brevo, verify the sender address (and domain if required by your account). Never commit the API key to GitHub. A successful backend response to forgot-password is deliberately generic; use Render logs and Brevo transactional email logs to diagnose sending problems.
